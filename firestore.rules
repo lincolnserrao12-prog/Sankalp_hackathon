@@ -1,0 +1,69 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+// incidents/{id}: public-to-signed-in safety record. title, hazard, severity,
+// riskScore, status, lat, lng, address, evidenceCount, createdAt and createdBy
+// are required. createdAt and createdBy are immutable. imageUrl and voiceText are optional.
+// reports/{id}: private evidence submission. text, hazard, severity, lat, lng,
+// address, authorUid and createdAt are required and immutable. imageUrl and voiceText are optional.
+// No user-profile collection is stored by this hackathon frontend; Firebase Auth
+// supplies identity. The owner Firebase account below is the bootstrap admin.
+// ===============================================================
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function isAdmin() {
+      return signedIn() && request.auth.token.email == 'lincolnserrao12@gmail.com';
+    }
+    function validHazard(value) {
+      return value is string && value in ['pothole', 'manhole', 'waterlogging', 'streetlight', 'garbage', 'crack', 'unsafe infrastructure'];
+    }
+    function validCoordinates(data) {
+      return data.lat is number && data.lat >= -90 && data.lat <= 90 &&
+        data.lng is number && data.lng >= -180 && data.lng <= 180;
+    }
+    function validIncident(data) {
+      return data.keys().hasAll(['title', 'hazard', 'severity', 'riskScore', 'status', 'lat', 'lng', 'address', 'evidenceCount', 'createdAt', 'createdBy']) &&
+        data.keys().hasOnly(['title', 'hazard', 'severity', 'riskScore', 'status', 'lat', 'lng', 'address', 'evidenceCount', 'createdAt', 'createdBy', 'updatedAt', 'imageUrl', 'voiceText']) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 250 &&
+        validHazard(data.hazard) && data.severity is int && data.severity >= 1 && data.severity <= 5 &&
+        data.riskScore is int && data.riskScore >= 0 && data.riskScore <= 100 &&
+        data.status in ['reported', 'verified', 'in_progress', 'resolved'] &&
+        validCoordinates(data) && data.address is string && data.address.size() <= 250 &&
+        data.evidenceCount is int && data.evidenceCount >= 1 && data.evidenceCount <= 100 &&
+        data.createdAt is timestamp && data.createdAt <= request.time &&
+        data.createdBy is string && data.createdBy.size() >= 1 && data.createdBy.size() <= 128 &&
+        (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time)) &&
+        (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 300)) &&
+        (!('voiceText' in data) || (data.voiceText is string && data.voiceText.size() <= 2000));
+    }
+    function validReport(data) {
+      return data.keys().hasOnly(['text', 'hazard', 'severity', 'lat', 'lng', 'address', 'authorUid', 'createdAt', 'imageUrl', 'voiceText']) &&
+        data.keys().hasAll(['text', 'hazard', 'severity', 'lat', 'lng', 'address', 'authorUid', 'createdAt']) &&
+        data.text is string && data.text.size() >= 1 && data.text.size() <= 2000 &&
+        validHazard(data.hazard) && data.severity is int && data.severity >= 1 && data.severity <= 5 &&
+        validCoordinates(data) && data.address is string && data.address.size() <= 250 &&
+        data.authorUid is string && data.authorUid == request.auth.uid &&
+        data.createdAt is timestamp && data.createdAt <= request.time &&
+        (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 300)) &&
+        (!('voiceText' in data) || (data.voiceText is string && data.voiceText.size() <= 2000));
+    }
+
+    match /incidents/{incidentId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && validIncident(request.resource.data) &&
+        request.resource.data.createdBy == request.auth.uid;
+      allow update: if isAdmin() && validIncident(request.resource.data) &&
+        request.resource.data.createdBy == resource.data.createdBy &&
+        request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isAdmin();
+    }
+
+    match /reports/{reportId} {
+      allow create: if signedIn() && validReport(request.resource.data);
+      allow read, update, delete: if isAdmin();
+    }
+  }
+}
