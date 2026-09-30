@@ -7,7 +7,6 @@ frontend/dist/
 iwitness.db
 data/
 archive/
-backend/models/
 backend/ml/runs/
 backend/ml/.venv/
 backend/ml/.torch-cache/
