@@ -1,0 +1,15 @@
+.env
+__pycache__/
+*.pyc
+backend/uploads/
+frontend/node_modules/
+frontend/dist/
+iwitness.db
+data/
+archive/
+backend/models/
+backend/ml/runs/
+backend/ml/.venv/
+backend/ml/.torch-cache/
+backend/ml/*.log
+backend/ml/__pycache__/

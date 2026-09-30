@@ -1,0 +1,26 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: iwitness
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/iwitness
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      DEMO_MODE: "true"
+    ports: ["8000:8000"]
+    volumes: ["./backend/uploads:/app/uploads"]
+    depends_on: [db]
+  web:
+    build: ./frontend
+    environment:
+      VITE_GOOGLE_MAPS_API_KEY: ${VITE_GOOGLE_MAPS_API_KEY:-}
+    ports: ["5173:5173"]
+    depends_on: [api]
+volumes:
+  pgdata:

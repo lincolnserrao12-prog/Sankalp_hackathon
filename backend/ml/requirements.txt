@@ -1,0 +1,5 @@
+# Install PyTorch separately from the CUDA wheel index in setup_training.ps1.
+torchmetrics>=1.6,<2
+pillow>=10,<13
+pandas>=2.2,<3
+scikit-learn>=1.5,<2
