@@ -20,33 +20,55 @@ service cloud.firestore {
     function validHazard(value) {
       return value is string && value in ['pothole', 'manhole', 'waterlogging', 'streetlight', 'garbage', 'crack', 'unsafe infrastructure'];
     }
+    function isNumberWithin(value, lo, hi) {
+      return (value is int || value is float) && value >= lo && value <= hi;
+    }
+    function isIntWithin(value, lo, hi) {
+      return (value is int || value is float) && value == int(value) && value >= lo && value <= hi;
+    }
     function validCoordinates(data) {
       return data.lat is number && data.lat >= -90 && data.lat <= 90 &&
         data.lng is number && data.lng >= -180 && data.lng <= 180;
+    }
+    function validVisionDetection(d) {
+      return d is map &&
+        d.keys().hasOnly(['h', 'c']) &&
+        d.h is string && d.h.size() >= 1 && d.h.size() <= 64 &&
+        isNumberWithin(d.c, 0.0, 1.0);
+    }
+    function detections8Valid(list) {
+      return (list.size() < 1 || validVisionDetection(list[0])) &&
+        (list.size() < 2 || validVisionDetection(list[1])) &&
+        (list.size() < 3 || validVisionDetection(list[2])) &&
+        (list.size() < 4 || validVisionDetection(list[3])) &&
+        (list.size() < 5 || validVisionDetection(list[4])) &&
+        (list.size() < 6 || validVisionDetection(list[5])) &&
+        (list.size() < 7 || validVisionDetection(list[6])) &&
+        (list.size() < 8 || validVisionDetection(list[7]));
     }
     function validIncident(data) {
       return data.keys().hasAll(['title', 'hazard', 'severity', 'riskScore', 'status', 'lat', 'lng', 'address', 'evidenceCount', 'createdAt', 'createdBy']) &&
         data.keys().hasOnly(['title', 'hazard', 'severity', 'riskScore', 'status', 'lat', 'lng', 'address', 'evidenceCount', 'createdAt', 'createdBy', 'updatedAt', 'imageUrl', 'voiceText', 'visionMode', 'visionTopConfidence', 'visionDetections']) &&
         data.title is string && data.title.size() >= 1 && data.title.size() <= 250 &&
-        validHazard(data.hazard) && data.severity is int && data.severity >= 1 && data.severity <= 5 &&
-        data.riskScore is int && data.riskScore >= 0 && data.riskScore <= 100 &&
+        validHazard(data.hazard) && isIntWithin(data.severity, 1, 5) &&
+        isIntWithin(data.riskScore, 0, 100) &&
         data.status in ['reported', 'verified', 'in_progress', 'resolved'] &&
         validCoordinates(data) && data.address is string && data.address.size() <= 250 &&
-        data.evidenceCount is int && data.evidenceCount >= 1 && data.evidenceCount <= 100 &&
+        isIntWithin(data.evidenceCount, 1, 100) &&
         data.createdAt is timestamp && data.createdAt <= request.time &&
         data.createdBy is string && data.createdBy.size() >= 1 && data.createdBy.size() <= 128 &&
         (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time)) &&
         (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 300)) &&
         (!('voiceText' in data) || (data.voiceText is string && data.voiceText.size() <= 2000)) &&
         (!('visionMode' in data) || (data.visionMode is string && data.visionMode.size() >= 1 && data.visionMode.size() <= 64)) &&
-        (!('visionTopConfidence' in data) || ((data.visionTopConfidence is float || data.visionTopConfidence is int) && data.visionTopConfidence >= 0.0 && data.visionTopConfidence <= 1.0)) &&
-        (!('visionDetections' in data) || (data.visionDetections is list && data.visionDetections.size() <= 8));
+        (!('visionTopConfidence' in data) || (isNumberWithin(data.visionTopConfidence, 0.0, 1.0))) &&
+        (!('visionDetections' in data) || (data.visionDetections is list && data.visionDetections.size() <= 8 && detections8Valid(data.visionDetections)));
     }
     function validReport(data) {
       return data.keys().hasOnly(['text', 'hazard', 'severity', 'lat', 'lng', 'address', 'authorUid', 'createdAt', 'imageUrl', 'voiceText', 'incidentId']) &&
         data.keys().hasAll(['text', 'hazard', 'severity', 'lat', 'lng', 'address', 'authorUid', 'createdAt']) &&
         data.text is string && data.text.size() >= 1 && data.text.size() <= 2000 &&
-        validHazard(data.hazard) && data.severity is int && data.severity >= 1 && data.severity <= 5 &&
+        validHazard(data.hazard) && isIntWithin(data.severity, 1, 5) &&
         validCoordinates(data) && data.address is string && data.address.size() <= 250 &&
         data.authorUid is string && data.authorUid == request.auth.uid &&
         data.createdAt is timestamp && data.createdAt <= request.time &&

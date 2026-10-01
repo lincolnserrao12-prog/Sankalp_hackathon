@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Activity, Camera, ExternalLink, ImagePlus, LogIn, LogOut, MapPin, Mic, MicOff, Navigation, Plus, ShieldCheck } from 'lucide-react'
-import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth'
+import { getRedirectResult, onAuthStateChanged, signInWithPopup, signInWithRedirect, signOut, type User } from 'firebase/auth'
 import { addDoc, collection, doc, onSnapshot, orderBy, query, serverTimestamp, updateDoc } from 'firebase/firestore'
 import { auth, db, googleProvider } from './firebase'
 import { classifyImage, pickFirestoreSafeHazard, visionSeverityBoost, type VisionResult } from './classifier'
@@ -33,13 +33,62 @@ function openTrack(item: Incident, provider: 'google' | 'osm' = 'google'): void 
 
 function App() {
   const [user, setUser] = useState<User | null>(null); const [incidents, setIncidents] = useState<Incident[]>([]); const [page, setPage] = useState<'dashboard'|'report'|'reports'|'map'>('dashboard'); const [notice, setNotice] = useState('')
+  const noticeTimerRef = useRef<number | null>(null)
+  const flashNotice = (msg: string, ttlMs = 18000) => {
+    setNotice(msg)
+    if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current)
+    noticeTimerRef.current = window.setTimeout(() => setNotice(''), ttlMs)
+  }
   const isAdmin = user?.email === ADMIN_EMAIL
-  useEffect(() => onAuthStateChanged(auth, current => setUser(current)), [])
-  useEffect(() => onSnapshot(query(collection(db, 'incidents'), orderBy('createdAt', 'desc')), snapshot => setIncidents(snapshot.docs.map(item => ({ id: item.id, ...item.data() } as Incident))), error => setNotice(`Could not load reports: ${error.message}`)), [])
-  const login = async () => { try { googleProvider.setCustomParameters({ prompt: 'select_account' }); await signInWithPopup(auth, googleProvider) } catch (error) { setNotice(error instanceof Error ? error.message : 'Google sign-in failed.') } }
+  useEffect(() => { setNotice('') }, [page])
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, current => {
+      setUser(current)
+      if (current) setNotice('')
+    })
+    let cancelled = false
+    getRedirectResult(auth)
+      .then(result => {
+        if (!cancelled && result?.user) setNotice('')
+      })
+      .catch(err => {
+        if (cancelled) return
+        const code = err && typeof err === 'object' && 'code' in err ? String((err as any).code || '') : ''
+        if (code && code !== 'auth/missing-iframe-start' && code !== 'auth/no-auth-event' && code !== 'auth/cancelled-popup-request') {
+          const msg = err instanceof Error ? err.message : String(err || 'Google sign-in redirect failed.')
+          flashNotice(msg, 20000)
+        }
+      })
+    return () => { cancelled = true; unsub() }
+  }, [])
+  useEffect(() => onSnapshot(query(collection(db, 'incidents'), orderBy('createdAt', 'desc')), snapshot => setIncidents(snapshot.docs.map(item => ({ id: item.id, ...item.data() } as Incident))), error => flashNotice(`Could not load reports: ${error.message}`, 30000)), [])
+  useEffect(() => () => { if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current) }, [])
+  const login = async () => {
+    try {
+      googleProvider.setCustomParameters({ prompt: 'select_account' })
+      await signInWithPopup(auth, googleProvider)
+    } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error ? String((error as any).code || '') : ''
+      if (code === 'auth/popup-blocked' || code === 'auth/cancelled-popup-request') {
+        try {
+          flashNotice('Popup blocked by your browser — redirecting you to Google sign-in instead…', 10000)
+          await signInWithRedirect(auth, googleProvider)
+          return
+        } catch (redirectErr) {
+          flashNotice(redirectErr instanceof Error ? redirectErr.message : 'Google sign-in redirect failed.', 20000)
+          return
+        }
+      }
+      if (code === 'auth/popup-closed-by-user') {
+        flashNotice('Sign-in cancelled (you closed the popup window). Click Continue with Google again to sign in.', 15000)
+        return
+      }
+      flashNotice(error instanceof Error ? error.message : 'Google sign-in failed.', 20000)
+    }
+  }
   if (!user) return <div className="auth"><div className="authcard"><div className="brand"><ShieldCheck/> Gaurdian Lens</div><h1>Public safety reports</h1><p>Sign in with Google to report a civic hazard with location and evidence.</p>{notice&&<p className="notice">{notice}</p>}<button className="primary" onClick={login}><LogIn/> Continue with Google</button><p><small>{incidents.length} live reports visible after sign-in.</small></p></div></div>
   const open = incidents.filter(item => item.status !== 'resolved').length; const critical = incidents.filter(item => item.riskScore >= 70).length
-  return <div className="shell"><aside><div className="brand"><ShieldCheck/> Gaurdian Lens</div><small>COMMUNITY SAFETY</small>{([['dashboard','Overview'],['report','Report hazard'],['reports','Public reports'],['map','Safety map']] as const).map(([key,label])=><button key={key} className={page===key?'active':''} onClick={()=>setPage(key)}>{key==='report'?<Plus/>:key==='map'?<MapPin/>:<Activity/>}{label}</button>)}<div className="profile">{user.displayName||user.email}<span>{isAdmin?'admin':'citizen'}</span><button onClick={()=>signOut(auth)}><LogOut/> Sign out</button></div></aside><main><header><div><p className="eyebrow">LIVE CIVIC INTELLIGENCE</p><h1>{page==='dashboard'?'Safety at a glance':page==='report'?'Report a hazard':page==='map'?'City safety map':'Public reports'}</h1></div><button className="primary" onClick={()=>setPage('report')}><Plus/> Report hazard</button></header>{notice&&<p className="notice">{notice}</p>}{page==='dashboard'&&<><section className="stats"><article className="stat"><i><Activity/></i><b>{incidents.length}</b><span>Total incidents</span></article><article className="stat"><i><Activity/></i><b>{open}</b><span>Open incidents</span></article><article className="stat"><i><Activity/></i><b>{critical}</b><span>Critical risk</span></article></section><section className="hero"><div><p className="eyebrow">COMMUNITY-POWERED</p><h2>Turn safety observations into actionable civic evidence.</h2><p>Guardian Lens triages reports by hazard, severity, and reported location.</p></div><ShieldCheck size={75}/></section>{incidents.length?<IncidentList incidents={incidents.slice(0,5)} isAdmin={isAdmin}/>:<section className="panel"><h2>No reports yet</h2><p>Submit the first hazard report to populate the dashboard.</p></section>}</>}{page==='report'&&<Report user={user} done={message=>{setNotice(message);setPage('reports')}}/>}{page==='reports'&&<section className="panel"><div className="sectiontitle"><h2>All incident reports</h2><span>{incidents.length} total</span></div><IncidentList incidents={incidents} isAdmin={isAdmin}/></section>}{page==='map'&&<Map incidents={incidents}/>}</main></div>
+  return <div className="shell"><aside><div className="brand"><ShieldCheck/> Gaurdian Lens</div><small>COMMUNITY SAFETY</small>{([['dashboard','Overview'],['report','Report hazard'],['reports','Public reports'],['map','Safety map']] as const).map(([key,label])=><button key={key} className={page===key?'active':''} onClick={()=>setPage(key)}>{key==='report'?<Plus/>:key==='map'?<MapPin/>:<Activity/>}{label}</button>)}<div className="profile">{user.displayName||user.email}<span>{isAdmin?'admin':'citizen'}</span><button onClick={()=>signOut(auth)}><LogOut/> Sign out</button></div></aside><main><header><div><p className="eyebrow">LIVE CIVIC INTELLIGENCE</p><h1>{page==='dashboard'?'Safety at a glance':page==='report'?'Report a hazard':page==='map'?'City safety map':'Public reports'}</h1></div><button className="primary" onClick={()=>setPage('report')}><Plus/> Report hazard</button></header>{notice&&<p className="notice">{notice}</p>}{page==='dashboard'&&<><section className="stats"><article className="stat"><i><Activity/></i><b>{incidents.length}</b><span>Total incidents</span></article><article className="stat"><i><Activity/></i><b>{open}</b><span>Open incidents</span></article><article className="stat"><i><Activity/></i><b>{critical}</b><span>Critical risk</span></article></section><section className="hero"><div><p className="eyebrow">COMMUNITY-POWERED</p><h2>Turn safety observations into actionable civic evidence.</h2><p>Guardian Lens triages reports by hazard, severity, and reported location.</p></div><ShieldCheck size={75}/></section>{incidents.length?<IncidentList incidents={incidents.slice(0,5)} isAdmin={isAdmin}/>:<section className="panel"><h2>No reports yet</h2><p>Submit the first hazard report to populate the dashboard.</p></section>}</>}{page==='report'&&<Report user={user} done={message=>{flashNotice(message, 24000);setPage('reports')}}/>}{page==='reports'&&<section className="panel"><div className="sectiontitle"><h2>All incident reports</h2><span>{incidents.length} total</span></div><IncidentList incidents={incidents} isAdmin={isAdmin}/></section>}{page==='map'&&<Map incidents={incidents}/>}</main></div>
 }
 
 function Report({user,done}:{user:User;done:(message:string)=>void}) {
@@ -56,10 +105,17 @@ function Report({user,done}:{user:User;done:(message:string)=>void}) {
   const [voiceText,setVoiceText]=useState('')
   const [vision,setVision]=useState<VisionResult|null>(null)
   const [analyzing,setAnalyzing]=useState(false)
+  const [formNotice,setFormNotice]=useState('')
   const fileRef=useRef<HTMLInputElement|null>(null)
   const captureRef=useRef<HTMLInputElement|null>(null)
   const addressRef=useRef<HTMLInputElement|null>(null)
   const recRef=useRef<any>(null)
+  const formNoticeTimerRef = useRef<number | null>(null)
+  const flashFormNotice = (msg: string, ttlMs = 15000) => {
+    setFormNotice(msg)
+    if (formNoticeTimerRef.current) window.clearTimeout(formNoticeTimerRef.current)
+    formNoticeTimerRef.current = window.setTimeout(() => setFormNotice(''), ttlMs)
+  }
   const ADDRESS_FIELD='address'
 
   const buildConciseAddress = (a: any): string => {
@@ -79,58 +135,80 @@ function Report({user,done}:{user:User;done:(message:string)=>void}) {
     return bits.join(', ')
   }
 
+  const populateFromCoords = async (la: number, ln: number, sourceLabel: string): Promise<void> => {
+    setLat(String(la))
+    setLng(String(ln))
+    setGeoStatus(`Looking up your street address (${sourceLabel}, OpenStreetMap Nominatim)…`)
+    try {
+      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(la)}&lon=${encodeURIComponent(ln)}&zoom=18&addressdetails=1&accept-language=en`
+      const res = await fetch(url, {
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'GuardianLens-Hackathon/1.0 (local civic reporting; low-volume interactive single requests per user)',
+        },
+      })
+      if (!res.ok) throw new Error(`reverse lookup HTTP ${res.status}`)
+      const data = await res.json()
+      const raw = typeof data?.display_name === 'string' ? data.display_name : ''
+      const concise = buildConciseAddress(data?.address)
+      const chosen = (concise || raw || '').slice(0, 250)
+      setAddress(chosen)
+      if (addressRef.current) {
+        try {
+          (addressRef.current as any).value = chosen
+          const ev = new Event('input', { bubbles: true })
+          ;(addressRef.current as any).dispatchEvent(ev)
+        } catch {}
+      }
+      setGeoStatus(chosen ? `✅ Address found (${sourceLabel}): ${chosen.length > 95 ? chosen.slice(0, 95) + '…' : chosen}` : `✅ Got coordinates (${sourceLabel}). Type any extra landmark note below.`)
+    } catch {
+      setGeoStatus(`✅ Got coordinates (${sourceLabel}). Address lookup skipped — you can still fill it by hand.`)
+    }
+  }
+
   const locate = () => {
-    if (!navigator.geolocation) { done('Geolocation is not supported in this browser. Use Chrome or Edge over HTTPS and enable location permissions.'); return }
+    if (!navigator.geolocation) { flashFormNotice('Geolocation is not supported in this browser. Use Chrome or Edge over HTTPS and enable location permissions.'); return }
     setLocating(true)
     setGeoStatus('Getting your GPS coordinates (high accuracy)…')
     navigator.geolocation.getCurrentPosition(
       async (position) => {
         const la = position.coords.latitude
         const ln = position.coords.longitude
-        setLat(String(la))
-        setLng(String(ln))
-        setGeoStatus('Looking up your street address (OpenStreetMap Nominatim)…')
         try {
-          const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(la)}&lon=${encodeURIComponent(ln)}&zoom=18&addressdetails=1&accept-language=en`
-          const res = await fetch(url, {
-            headers: {
-              Accept: 'application/json',
-              'User-Agent': 'GuardianLens-Hackathon/1.0 (local civic reporting; low-volume interactive single requests per user)',
-            },
-          })
-          if (!res.ok) throw new Error(`reverse lookup HTTP ${res.status}`)
-          const data = await res.json()
-          const raw = typeof data?.display_name === 'string' ? data.display_name : ''
-          const concise = buildConciseAddress(data?.address)
-          const chosen = (concise || raw || '').slice(0, 250)
-          setAddress(chosen)
-          if (addressRef.current) {
-            try {
-              (addressRef.current as any).value = chosen
-              const ev = new Event('input', { bubbles: true })
-              ;(addressRef.current as any).dispatchEvent(ev)
-            } catch {}
-          }
-          setGeoStatus(chosen ? `✅ Address found: ${chosen.length > 95 ? chosen.slice(0, 95) + '…' : chosen}` : '✅ Got your coordinates. Type any extra landmark note below.')
-        } catch (e) {
-          setGeoStatus('✅ Got coordinates. Address lookup skipped — you can still fill it by hand.')
-        } finally {
-          setLocating(false)
-        }
+          await populateFromCoords(la, ln, 'live GPS')
+        } finally { setLocating(false) }
       },
       (error) => {
         setLocating(false)
         setGeoStatus('')
-        done(`Could not get location: ${error.message}. Enable GPS/ Location permissions and try again.`)
+        flashFormNotice(`Could not get location: ${error.message}. Enable GPS/ Location permissions and try again.`)
       },
       { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 },
     )
+  }
+
+  const tryGrabLiveLocationOnCamera = () => {
+    if (!navigator.geolocation) return
+    try {
+      if (validLatLng(Number(lat), Number(lng))) return
+      navigator.geolocation.getCurrentPosition(
+        async (position) => {
+          const la = position.coords.latitude
+          const ln = position.coords.longitude
+          if (validLatLng(Number(lat), Number(lng))) return
+          await populateFromCoords(la, ln, 'camera-triggered live GPS').catch(() => {})
+        },
+        () => {},
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 },
+      )
+    } catch {}
   }
 
   useEffect(() => {
     return () => {
       if (previewUrl) URL.revokeObjectURL(previewUrl)
       if (recRef.current) { try { recRef.current.onend = null; recRef.current.stop() } catch {} }
+      if (formNoticeTimerRef.current) window.clearTimeout(formNoticeTimerRef.current)
     }
   }, [previewUrl])
 
@@ -145,8 +223,14 @@ function Report({user,done}:{user:User;done:(message:string)=>void}) {
       try {
         const r = await classifyImage(f)
         setVision(r)
+        const exifGps = r && typeof r.gpsLat === 'number' && typeof r.gpsLng === 'number'
+          ? { lat: r.gpsLat, lng: r.gpsLng }
+          : null
+        if (exifGps && !validLatLng(Number(lat), Number(lng))) {
+          await populateFromCoords(exifGps.lat, exifGps.lng, 'photo EXIF GPS')
+        }
       } catch {
-        setVision({ available: false, detections: [], noIssueDetected: true, error: 'analysis-failed' })
+        setVision({ available: false, detections: [], noIssueDetected: false, error: 'analysis-failed' })
       } finally { setAnalyzing(false) }
     }
   }
@@ -163,9 +247,9 @@ function Report({user,done}:{user:User;done:(message:string)=>void}) {
       setVoiceText(combined)
       setText((prev) => prev ? prev + `${prev.endsWith(' ') || prev.endsWith('\n') ? '' : ' '}${combined}` : combined)
     }
-    r.onerror = (e: any) => { done(`Speech error: ${e.error}. Allow microphone permissions and try again.`); setRecording(false) }
+    r.onerror = (e: any) => { flashFormNotice(`Speech error: ${e.error}. Allow microphone permissions and try again.`); setRecording(false) }
     r.onend = () => { setRecording(false) }
-    try { r.start(); recRef.current = r; setRecording(true) } catch (e: any) { done(`Could not start microphone: ${e?.message ?? e}`) }
+    try { r.start(); recRef.current = r; setRecording(true) } catch (e: any) { flashFormNotice(`Could not start microphone: ${e?.message ?? e}`) }
   }
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -174,13 +258,18 @@ function Report({user,done}:{user:User;done:(message:string)=>void}) {
     try {
       const latNum = Number(lat); const lngNum = Number(lng)
       if (!validLatLng(latNum, lngNum)) {
-        done('Enter a valid latitude/longitude first, or tap "Use my live location (GPS + auto address)". Empty coordinates will not be silently accepted.')
+        flashFormNotice('Enter a valid latitude/longitude first, or tap "Use my live location (GPS + auto address)". Empty coordinates will not be silently accepted.')
+        return
+      }
+      const combinedDescription = (text + ' ' + voiceText).trim()
+      if (combinedDescription.length < 2) {
+        flashFormNotice('Add a short description (type or tap the mic to speak) before submitting — at least 2 characters needed.')
         return
       }
       if (photo && !isSupabaseConfigured()) {
         const issueMsgs = describeConfigIssues(configIssues())
         const hint = issueMsgs.length ? ` Details: ${issueMsgs.join(' ')}` : ' Set VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY in frontend/.env (Supabase FREE plan — no credit card required).'
-        done(`Photo selected but Supabase is not set up for free image storage. Remove the photo, or rebuild the frontend with valid Supabase settings.${hint}`)
+        flashFormNotice(`Photo selected but Supabase is not set up for free image storage. Remove the photo, or rebuild the frontend with valid Supabase settings.${hint}`)
         return
       }
       const baseline = classify(text + ' ' + voiceText)
@@ -195,7 +284,7 @@ function Report({user,done}:{user:User;done:(message:string)=>void}) {
         const result = await uploadReportImage(user.uid, photo)
         if (!result.ok) {
           const hint = result.detail ? ` — ${result.detail}` : ''
-          done(`Image upload failed (stage: ${result.stage}). ${result.error}${hint}`)
+          flashFormNotice(`Image upload failed (stage: ${result.stage}). ${result.error}${hint}`)
           return
         }
         imageUrl = result.imageUrl
@@ -229,37 +318,45 @@ function Report({user,done}:{user:User;done:(message:string)=>void}) {
         incidentId = ref.id
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        done(`Incident Firestore write failed. ${msg}. Public incident was not created.`)
+        flashFormNotice(`Incident Firestore write failed. ${msg}. Public incident was not created.`)
         return
       }
       try {
-        const reportBase = { text, hazard, severity, lat: latNum, lng: lngNum, address: addressValue, authorUid: user.uid, createdAt: serverTimestamp(), incidentId }
+        const reportBase = { text: combinedDescription, hazard, severity, lat: latNum, lng: lngNum, address: addressValue, authorUid: user.uid, createdAt: serverTimestamp(), incidentId }
         await addDoc(collection(db, 'reports'), { ...reportBase, ...(imageUrl ? { imageUrl } : {}), ...(voiceText ? { voiceText } : {}) })
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         done(`Report (evidence) Firestore write failed. The incident was created (ID: ${incidentId}), but the private reporter record could not be saved. ${msg}`)
         return
       }
-      let mode = 'deterministic text fallback'
-      if (visionResult && visionResult.available) mode = visionResult.mode || 'onnx'
-      else if (visionResult && !visionResult.available && visionResult.error !== 'onnx-session-unavailable') mode = `onnx unavailable (${visionResult.error})`
-      const detectionNote = visionResult && visionResult.detections.length ? `; vision detections: ${visionResult.detections.map(d => `${d.hazard} ${Math.round(d.confidence * 100)}%`).join(', ')}` : ''
+      let mode: string
+      if (visionResult && visionResult.available) {
+        mode = visionResult.mode || 'onnx-efficientnet_b0'
+      } else {
+        mode = visionResult && visionResult.error
+          ? `deterministic text fallback (ONNX model unavailable: ${visionResult.error})`
+          : 'deterministic text fallback (no photo or ONNX not applied)'
+      }
+      const detectionNote = visionResult && visionResult.available && visionResult.detections.length
+        ? `; vision detections: ${visionResult.detections.map(d => `${d.hazard} ${Math.round(d.confidence * 100)}%`).join(', ')}`
+        : (visionResult && !visionResult.available ? '; (no vision detections — model could not be loaded)' : '')
       const voiceNote = voiceText ? '; voice transcription saved.' : ''
       const storageNote = photo ? ' (image stored free on Supabase Storage).' : ''
       done(`Report submitted (incident ${incidentId}). Guardian Lens identified ${hazard} at severity ${severity}/5 using ${mode}${detectionNote}${voiceNote}${storageNote}`)
-    } catch (error) { done(error instanceof Error ? error.message : 'Could not submit report.') } finally { setBusy(false) }
+    } catch (error) { flashFormNotice(error instanceof Error ? error.message : 'Could not submit report.') } finally { setBusy(false) }
   }
 
   return (
     <form className="report panel" onSubmit={submit}>
+      {formNotice && <p className="notice small">{formNotice}</p>}
       <div className="photosection">
         <label className="photolabel">
           <span><ImagePlus/> Evidence photo <small>(optional, stored FREE on Supabase Storage, classified with your ONNX model)</small></span>
           <div className="photoactions">
             <input ref={fileRef} type="file" accept="image/*" onChange={onPickFile} hidden/>
-            <button type="button" className="secondary" onClick={() => fileRef.current?.click()}><ImagePlus size={16}/> Upload photo</button>
+            <button type="button" className="secondary" onClick={() => { fileRef.current?.click() }}><ImagePlus size={16}/> Upload photo</button>
             <input ref={captureRef} type="file" accept="image/*" capture="environment" onChange={onPickFile} hidden/>
-            <button type="button" className="secondary" onClick={() => captureRef.current?.click()}><Camera size={16}/> Take photo (camera)</button>
+            <button type="button" className="secondary" onClick={() => { captureRef.current?.click(); tryGrabLiveLocationOnCamera() }}><Camera size={16}/> Take photo (camera)</button>
           </div>
         </label>
         {!isSupabaseConfigured() && <p className="notice"><small>💡 Photo uploads are disabled until Supabase is configured (FREE tier, no credit card). Set VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY in frontend/.env. Follow README.md step-by-step.</small></p>}
@@ -275,21 +372,25 @@ function Report({user,done}:{user:User;done:(message:string)=>void}) {
       {analyzing && <div className="analysis analyzing"><ShieldCheck size={18}/> <span>Analysing your photo with the ONNX model… this usually takes 1–3 seconds.</span></div>}
 
       {!analyzing && photo && vision && (
-        <div className={'analysis ' + (vision.detections.length ? 'issues' : 'ok')}>
-          {vision.detections.length ? (
-            <>
-              <h3><ShieldCheck size={18}/> Model report — issues found ({vision.detections.length})</h3>
-              <ul>{vision.detections.map((d, i) => <li key={i}><b>{d.hazard.replace(/_/g, ' ')}</b><span>{Math.round(d.confidence * 100)}% confidence</span></li>)}</ul>
-              <p className="hint">Confidence threshold: 65%. Top detection will be used for hazard classification and severity boost. Add any extra details below.</p>
-            </>
-          ) : (
-            <>
-              <h3><ShieldCheck size={18}/> Model report — no issues found</h3>
-              <p>Your trained ONNX model did not flag any recognised hazard above the 65% confidence threshold.{vision.available ? '' : ` (Model unavailable: ${vision.error})`}</p>
-              <p className="hint">Still add a description below — the text classifier will also contribute, and a human reviewer will see your photo.</p>
-            </>
-          )}
-        </div>
+        !vision.available ? (
+          <div className="analysis warn">
+            <h3><ShieldCheck size={18}/> Model analysis unavailable</h3>
+            <p className="notice small">{vision.error || 'The trained Guardian Lens ONNX model could not be loaded in this environment.'}</p>
+            <p className="hint">Your hazard classification will still use the description text + human review. This box does NOT mean the photo has no issues — it means the model could not be run.</p>
+          </div>
+        ) : vision.detections.length ? (
+          <div className="analysis issues">
+            <h3><ShieldCheck size={18}/> Model report — issues found ({vision.detections.length})</h3>
+            <ul>{vision.detections.map((d, i) => <li key={i}><b>{d.hazard.replace(/_/g, ' ')}</b><span>{Math.round(d.confidence * 100)}% confidence</span></li>)}</ul>
+            <p className="hint">Confidence threshold: 65%. Top detection will be used for hazard classification and severity boost. Add any extra details below.</p>
+          </div>
+        ) : (
+          <div className="analysis ok">
+            <h3><ShieldCheck size={18}/> Model report — no issues found</h3>
+            <p>Your trained ONNX model ran on this photo and did not flag any recognised hazard above the 65% confidence threshold.</p>
+            <p className="hint">Still add a description below — the text classifier will also contribute, and a human reviewer will see your photo.</p>
+          </div>
+        )
       )}
 
       <div className="twocol">
