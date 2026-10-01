@@ -26,7 +26,7 @@ service cloud.firestore {
     }
     function validIncident(data) {
       return data.keys().hasAll(['title', 'hazard', 'severity', 'riskScore', 'status', 'lat', 'lng', 'address', 'evidenceCount', 'createdAt', 'createdBy']) &&
-        data.keys().hasOnly(['title', 'hazard', 'severity', 'riskScore', 'status', 'lat', 'lng', 'address', 'evidenceCount', 'createdAt', 'createdBy', 'updatedAt', 'imageUrl', 'voiceText']) &&
+        data.keys().hasOnly(['title', 'hazard', 'severity', 'riskScore', 'status', 'lat', 'lng', 'address', 'evidenceCount', 'createdAt', 'createdBy', 'updatedAt', 'imageUrl', 'voiceText', 'visionMode', 'visionTopConfidence', 'visionDetections']) &&
         data.title is string && data.title.size() >= 1 && data.title.size() <= 250 &&
         validHazard(data.hazard) && data.severity is int && data.severity >= 1 && data.severity <= 5 &&
         data.riskScore is int && data.riskScore >= 0 && data.riskScore <= 100 &&
@@ -37,10 +37,13 @@ service cloud.firestore {
         data.createdBy is string && data.createdBy.size() >= 1 && data.createdBy.size() <= 128 &&
         (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time)) &&
         (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 300)) &&
-        (!('voiceText' in data) || (data.voiceText is string && data.voiceText.size() <= 2000));
+        (!('voiceText' in data) || (data.voiceText is string && data.voiceText.size() <= 2000)) &&
+        (!('visionMode' in data) || (data.visionMode is string && data.visionMode.size() >= 1 && data.visionMode.size() <= 64)) &&
+        (!('visionTopConfidence' in data) || ((data.visionTopConfidence is float || data.visionTopConfidence is int) && data.visionTopConfidence >= 0.0 && data.visionTopConfidence <= 1.0)) &&
+        (!('visionDetections' in data) || (data.visionDetections is list && data.visionDetections.size() <= 8));
     }
     function validReport(data) {
-      return data.keys().hasOnly(['text', 'hazard', 'severity', 'lat', 'lng', 'address', 'authorUid', 'createdAt', 'imageUrl', 'voiceText']) &&
+      return data.keys().hasOnly(['text', 'hazard', 'severity', 'lat', 'lng', 'address', 'authorUid', 'createdAt', 'imageUrl', 'voiceText', 'incidentId']) &&
         data.keys().hasAll(['text', 'hazard', 'severity', 'lat', 'lng', 'address', 'authorUid', 'createdAt']) &&
         data.text is string && data.text.size() >= 1 && data.text.size() <= 2000 &&
         validHazard(data.hazard) && data.severity is int && data.severity >= 1 && data.severity <= 5 &&
@@ -48,7 +51,8 @@ service cloud.firestore {
         data.authorUid is string && data.authorUid == request.auth.uid &&
         data.createdAt is timestamp && data.createdAt <= request.time &&
         (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 300)) &&
-        (!('voiceText' in data) || (data.voiceText is string && data.voiceText.size() <= 2000));
+        (!('voiceText' in data) || (data.voiceText is string && data.voiceText.size() <= 2000)) &&
+        (!('incidentId' in data) || (data.incidentId is string && data.incidentId.size() >= 1 && data.incidentId.size() <= 128));
     }
 
     match /incidents/{incidentId} {

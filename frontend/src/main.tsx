@@ -5,7 +5,7 @@ import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebas
 import { addDoc, collection, doc, onSnapshot, orderBy, query, serverTimestamp, updateDoc } from 'firebase/firestore'
 import { auth, db, googleProvider } from './firebase'
 import { classifyImage, pickFirestoreSafeHazard, visionSeverityBoost, type VisionResult } from './classifier'
-import { isSupabaseConfigured, uploadReportImage } from './supabase'
+import { isSupabaseConfigured, uploadReportImage, configIssues, describeConfigIssues } from './supabase'
 import './style.css'
 
 type Incident = { id: string; title: string; hazard: string; severity: number; riskScore: number; status: 'reported'|'verified'|'in_progress'|'resolved'; lat: number; lng: number; address: string; evidenceCount: number; imageUrl?: string; voiceText?: string }
@@ -172,7 +172,17 @@ function Report({user,done}:{user:User;done:(message:string)=>void}) {
     event.preventDefault()
     setBusy(true)
     try {
-      if (photo && !isSupabaseConfigured()) { done('Photo selected but Supabase is not set up for free image storage. Remove the photo, or set VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY in frontend/.env (Supabase FREE plan — no credit card required).'); return }
+      const latNum = Number(lat); const lngNum = Number(lng)
+      if (!validLatLng(latNum, lngNum)) {
+        done('Enter a valid latitude/longitude first, or tap "Use my live location (GPS + auto address)". Empty coordinates will not be silently accepted.')
+        return
+      }
+      if (photo && !isSupabaseConfigured()) {
+        const issueMsgs = describeConfigIssues(configIssues())
+        const hint = issueMsgs.length ? ` Details: ${issueMsgs.join(' ')}` : ' Set VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY in frontend/.env (Supabase FREE plan — no credit card required).'
+        done(`Photo selected but Supabase is not set up for free image storage. Remove the photo, or rebuild the frontend with valid Supabase settings.${hint}`)
+        return
+      }
       const baseline = classify(text + ' ' + voiceText)
       let hazard = baseline.hazard
       let severity = baseline.severity
@@ -180,21 +190,63 @@ function Report({user,done}:{user:User;done:(message:string)=>void}) {
       if (photo && !visionResult) visionResult = await classifyImage(photo)
       if (visionResult) { hazard = pickFirestoreSafeHazard(visionResult, baseline.hazard); severity = visionSeverityBoost(visionResult, baseline.severity) }
       const addressValue = (address || (new FormData(event.currentTarget).get(ADDRESS_FIELD) as string) || '').slice(0, 250)
-      let imageUrl = ''
-      if (photo) { const result = await uploadReportImage(user.uid, photo); if (!result.ok) { done(`Could not upload photo to Supabase: ${result.error}`); return }; imageUrl = result.imageUrl }
-      const locationLabel = addressValue || (lat && lng ? `${Number(lat).toFixed(4)}, ${Number(lng).toFixed(4)}` : 'your location')
-      const incidentBase = { title: `${hazard.replace(/\b\w/g, x => x.toUpperCase())} reported near ${locationLabel}`, hazard, severity, riskScore: score(severity), status: 'reported' as const, lat: Number(lat), lng: Number(lng), address: addressValue, evidenceCount: 1, createdAt: serverTimestamp(), createdBy: user.uid }
-      const incident = { ...incidentBase, ...(imageUrl ? { imageUrl } : {}), ...(voiceText ? { voiceText } : {}) }
-      await addDoc(collection(db, 'incidents'), incident)
-      const reportBase = { text, hazard, severity, lat: Number(lat), lng: Number(lng), address: addressValue, authorUid: user.uid, createdAt: serverTimestamp() }
-      await addDoc(collection(db, 'reports'), { ...reportBase, ...(imageUrl ? { imageUrl } : {}), ...(voiceText ? { voiceText } : {}) })
+      let imageUrl: string | undefined
+      if (photo) {
+        const result = await uploadReportImage(user.uid, photo)
+        if (!result.ok) {
+          const hint = result.detail ? ` — ${result.detail}` : ''
+          done(`Image upload failed (stage: ${result.stage}). ${result.error}${hint}`)
+          return
+        }
+        imageUrl = result.imageUrl
+      }
+      const locationLabel = addressValue || `${latNum.toFixed(4)}, ${lngNum.toFixed(4)}`
+      const visionTopConfidence = visionResult?.detections?.length ? visionResult.detections.reduce((m, d) => Math.max(m, d.confidence), 0) : undefined
+      const visionSnapshot = visionResult && visionResult.available
+        ? {
+            visionMode: visionResult.mode || 'onnx-efficientnet_b0',
+            ...(typeof visionTopConfidence === 'number' ? { visionTopConfidence } : {}),
+            ...(visionResult.detections.length ? { visionDetections: visionResult.detections.slice(0, 8).map(d => ({ h: d.hazard, c: Math.round(d.confidence * 1000) / 1000 })) } : {}),
+          }
+        : {}
+      const incidentBase = {
+        title: `${hazard.replace(/\b\w/g, x => x.toUpperCase())} reported near ${locationLabel}`,
+        hazard,
+        severity,
+        riskScore: score(severity),
+        status: 'reported' as const,
+        lat: latNum,
+        lng: lngNum,
+        address: addressValue,
+        evidenceCount: 1,
+        createdAt: serverTimestamp(),
+        createdBy: user.uid,
+      }
+      const incidentDoc = { ...incidentBase, ...(imageUrl ? { imageUrl } : {}), ...(voiceText ? { voiceText } : {}), ...visionSnapshot }
+      let incidentId = ''
+      try {
+        const ref = await addDoc(collection(db, 'incidents'), incidentDoc)
+        incidentId = ref.id
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        done(`Incident Firestore write failed. ${msg}. Public incident was not created.`)
+        return
+      }
+      try {
+        const reportBase = { text, hazard, severity, lat: latNum, lng: lngNum, address: addressValue, authorUid: user.uid, createdAt: serverTimestamp(), incidentId }
+        await addDoc(collection(db, 'reports'), { ...reportBase, ...(imageUrl ? { imageUrl } : {}), ...(voiceText ? { voiceText } : {}) })
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        done(`Report (evidence) Firestore write failed. The incident was created (ID: ${incidentId}), but the private reporter record could not be saved. ${msg}`)
+        return
+      }
       let mode = 'deterministic text fallback'
       if (visionResult && visionResult.available) mode = visionResult.mode || 'onnx'
       else if (visionResult && !visionResult.available && visionResult.error !== 'onnx-session-unavailable') mode = `onnx unavailable (${visionResult.error})`
       const detectionNote = visionResult && visionResult.detections.length ? `; vision detections: ${visionResult.detections.map(d => `${d.hazard} ${Math.round(d.confidence * 100)}%`).join(', ')}` : ''
       const voiceNote = voiceText ? '; voice transcription saved.' : ''
       const storageNote = photo ? ' (image stored free on Supabase Storage).' : ''
-      done(`Report submitted. Guardian Lens identified ${hazard} at severity ${severity}/5 using ${mode}${detectionNote}${voiceNote}${storageNote}`)
+      done(`Report submitted (incident ${incidentId}). Guardian Lens identified ${hazard} at severity ${severity}/5 using ${mode}${detectionNote}${voiceNote}${storageNote}`)
     } catch (error) { done(error instanceof Error ? error.message : 'Could not submit report.') } finally { setBusy(false) }
   }
 
@@ -286,9 +338,17 @@ function IncidentList({incidents,isAdmin}:{incidents:Incident[];isAdmin:boolean}
             <b>{item.title}</b>
             <p className="locationrow">
               <MapPin size={13}/>
-              <span className="addresstext" title={item.address || `${item.lat.toFixed(4)}, ${item.lng.toFixed(4)}`}>
-                {item.address || `${item.lat.toFixed(4)}, ${item.lng.toFixed(4)}`}
-              </span>
+              <button
+                type="button"
+                className="addresslink"
+                onClick={()=>validLatLng(item.lat,item.lng) && openTrack(item,'google')}
+                title={validLatLng(item.lat,item.lng) ? 'Click to track this location in Google Maps' : 'No valid coordinates on this report'}
+                disabled={!validLatLng(item.lat,item.lng)}
+              >
+                <span className="addresstext" title={item.address || `${item.lat.toFixed(4)}, ${item.lng.toFixed(4)}`}>
+                  {item.address || `${item.lat.toFixed(4)}, ${item.lng.toFixed(4)}`}
+                </span>
+              </button>
             </p>
             <p>{item.hazard} · Severity {item.severity}/5 · {item.evidenceCount} report{item.evidenceCount===1?'':'s'}</p>
             {item.imageUrl && <img className="thumb" src={item.imageUrl} alt="" loading="lazy"/>}
